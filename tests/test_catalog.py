@@ -342,3 +342,54 @@ def test_image_url_raises_clearly_when_nothing_works(cache, monkeypatch):
     }))
     with pytest.raises(RuntimeError, match="NASA has no image for 2027-01-01T00:00"):
         cat.image_url(cache, record)
+
+
+# --- high-resolution frames ---------------------------------------------
+
+PAGE_2012 = """
+<a href="/vis/a000000/a003800/a003894/frames/1920x1080_16x9_30p/moon/">partial 30p set</a>
+<a href="/vis/a000000/a003800/a003894/frames/1920x1080_16x9_30p/comp/">composite</a>
+<a href="/vis/a000000/a003800/a003894/frames/1920x1080_16x9_60p/">full 60p set</a>
+<a href="/vis/a000000/a003800/a003894/frames/730x730_1x1_60p/">730</a>
+"""
+
+PAGE_2015 = """
+<a href="/vis/a000000/a004200/a004236/frames/1080x1080_1x1_30p/">orbit diagram</a>
+<a href="/vis/a000000/a004200/a004236/frames/1920x1080_16x9_30p/fancy/">fancy</a>
+<a href="/vis/a000000/a004200/a004236/frames/1920x1080_16x9_30p/plain/">plain</a>
+<a href="/vis/a000000/a004200/a004236/frames/5760x3240_16x9_30p/labels/">labels</a>
+<a href="/vis/a000000/a004200/a004236/frames/5760x3240_16x9_30p/plain/">plain</a>
+<a href="/vis/a000000/a004200/a004236/frames/730x730_1x1_30p/">730</a>
+"""
+
+
+def test_find_highres_href_2012_uses_full_60p_set():
+    assert cat.find_highres_href(PAGE_2012, 3894, 1920) == "/vis/a000000/a003800/a003894/frames/1920x1080_16x9_60p/"
+    assert cat.find_highres_href(PAGE_2012, 3894, 5760) is None
+
+
+def test_find_highres_href_prefers_plain_and_reports_missing():
+    assert cat.find_highres_href(PAGE_2015, 4236, 1920).endswith("/1920x1080_16x9_30p/plain/")
+    assert cat.find_highres_href(PAGE_2015, 4236, 3840) is None
+    assert cat.find_highres_href(PAGE_2015, 4236, 5760).endswith("/5760x3240_16x9_30p/plain/")
+
+
+def _record(year, index=99):
+    return cat.MoonRecord(year, index, datetime(year, 1, 5, 3, tzinfo=UTC), *([0.0] * 11))
+
+
+def test_highres_falls_back_to_next_largest_available(cache, monkeypatch):
+    session = ScriptedSession({"/4236/": FakeResponse(text=PAGE_2015)})
+    monkeypatch.setattr(cat, "SESSION", session)
+
+    url, used = cat.highres_image_url(cache, _record(2015), 3840)
+    assert used == 1920 and url.endswith("/1920x1080_16x9_30p/plain/moon.0100.tif")
+
+    url, used = cat.highres_image_url(cache, _record(2015), 5760)
+    assert used == 5760 and url.endswith("/5760x3240_16x9_30p/plain/moon.0100.tif")
+    assert len(session.calls) == 1  # all sizes recorded from one page visit
+
+
+def test_highres_none_available(cache, monkeypatch):
+    monkeypatch.setattr(cat, "SESSION", ScriptedSession({"/4236/": FakeResponse(text="<html></html>")}))
+    assert cat.highres_image_url(cache, _record(2015), 5760) == (None, 730)

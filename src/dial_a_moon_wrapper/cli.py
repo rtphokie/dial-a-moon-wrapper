@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import timedelta
 from typing import Optional, Sequence
 
 from . import catalog as cat
@@ -42,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="zenith",
         help="Put the observer's zenith (default) or celestial north at the top.",
     )
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        choices=cat.RESOLUTIONS,
+        default=730,
+        help="NASA frame width: 730 (default; 730 px output), or 1920/3840/5760 "
+        "(1080/2160/3240 px output). Falls back to the largest smaller size "
+        "the year has.",
+    )
     parser.add_argument("--output", "-o", help="Path for the rotated image.")
     parser.add_argument(
         "--cache-dir", help="Cache root (default: $DIALAMOON_CACHE, "
@@ -51,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--ephemeris-file",
         help="Path to an existing copy of JPL's de421.bsp (default: found in or "
         "downloaded to the cache).",
+    )
+    parser.add_argument(
+        "--cache-ttl",
+        type=float,
+        default=14,
+        metavar="DAYS",
+        help="Delete cached NASA images and generated images unused for this "
+        "many days (default 14; 0 disables).",
     )
     parser.add_argument(
         "--no-image",
@@ -113,9 +131,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             elevation=args.elevation,
             timezone_name=args.timezone,
             orientation=args.orientation,
+            resolution=args.resolution,
             output=args.output,
             cache_dir=paths.root,
             ephemeris_file=args.ephemeris_file,
+            cache_ttl=timedelta(days=args.cache_ttl) if args.cache_ttl > 0 else None,
             download_image=not args.no_image,
         )
     except Exception as exc:  # surface a clean message on the CLI
@@ -141,7 +161,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Moon:     alt {obs.altitude:.1f} deg, az {obs.azimuth:.1f} deg")
     print(f"Rotation: {result.rotation_degrees:+.1f} deg ({result.orientation} up)")
     if result.image:
-        print(f"Image:    {result.image}")
+        print(f"Image:    {result.image} (NASA {result.resolution} frame)")
     for note in result.notes:
         print(f"Note:     {note}")
     return 0

@@ -1,3 +1,4 @@
+import os
 import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -170,7 +171,9 @@ def test_render_official(offline):
     assert result.match_score == 0.0
     # Official frame: only the parallactic rotation applies.
     assert result.rotation_degrees == pytest.approx(-12.0)
-    assert result.image.exists() and result.image.parent == cache.results
+    assert result.image.exists()
+    assert result.image.parent == cache.results / "zenith" / "730"
+    assert result.image.name == "20200102T031000Z_+35.7800_-78.6400.jpg"
     assert downloads == [f"https://example/moon.{result.source.frame_number:04d}.jpg"]
 
     payload = json.loads(result.result_json.read_text())
@@ -252,3 +255,85 @@ def test_render_location_arguments_validated(offline, kwargs):
     cache, _, _ = offline
     with pytest.raises(ValueError):
         core.render_moon("2020-01-02 10:00", cache_dir=cache.root, download_image=False, **kwargs)
+
+
+# --- resolution ----------------------------------------------------------
+
+
+def test_square_frame_crops_and_keeps_transparency():
+    frame = Image.new("RGBA", (192, 108), (0, 0, 0, 0))  # transparent 16:9
+    frame.paste((200, 180, 160, 255), (66, 24, 126, 84))  # opaque centered "Moon"
+    out = core.square_frame(frame)
+    assert out.mode == "RGBA" and out.size == (108, 108)
+    a = np.asarray(out)
+    assert a[0, 0, 3] == 0  # still transparent
+    assert a[54, 54].tolist() == [200, 180, 160, 255]
+
+
+def test_square_frame_leaves_730_frames_alone():
+    frame = Image.new("RGB", (730, 730), (5, 5, 5))
+    out = core.square_frame(frame)
+    assert out.size == (730, 730) and out.mode == "RGB"
+
+
+def _highres_source(tmp_path):
+    src = tmp_path / "moon.tif"
+    frame = Image.new("RGBA", (192, 108), (0, 0, 0, 0))
+    frame.paste((200, 180, 160, 255), (66, 24, 126, 84))
+    frame.save(src, format="TIFF")
+    return src
+
+
+def test_rotate_highres_png_stays_transparent(tmp_path):
+    out = tmp_path / "out.png"
+    assert core.rotate_image(_highres_source(tmp_path), out, 30.0) is False
+    rotated = Image.open(out)
+    a = np.asarray(rotated)
+    assert rotated.mode == "RGBA" and rotated.size == (108, 108)
+    assert a[0, 0, 3] == 0 and a[54, 54, 3] == 255
+
+
+def test_rotate_highres_to_jpeg_is_flattened_onto_black(tmp_path):
+    out = tmp_path / "out.jpg"
+    assert core.rotate_image(_highres_source(tmp_path), out, 30.0) is True
+    rotated = Image.open(out)
+    assert rotated.mode == "RGB" and np.asarray(rotated)[:5, :5].max() <= 2
+
+
+def test_render_highres_with_fallback(offline, monkeypatch):
+    cache, _, downloads = offline
+    monkeypatch.setattr(
+        core.cat, "highres_image_url",
+        lambda paths, r, width: (f"https://example/1920/moon.{r.frame_number:04d}.tif", 1920),
+    )
+
+    def fake_download(url, dest):
+        downloads.append(url)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (192, 108), (0, 0, 0, 0)).save(dest, format="TIFF")
+
+    monkeypatch.setattr(core, "download_file", fake_download)
+    result = core.render_moon("2020-01-02 10:00", 35.78, -78.64, cache_dir=cache.root, resolution=5760)
+
+    assert result.resolution == 1920 and result.requested_resolution == 5760
+    assert result.source_image.parent.name == "1920"
+    assert result.image.suffix == ".png"
+    rendered = Image.open(result.image)
+    assert rendered.size == (108, 108) and rendered.mode == "RGBA"
+    assert any("next largest available size, 1920" in n for n in result.notes)
+    payload = result.to_dict()
+    assert payload["request"]["resolution"] == 5760 and payload["resolution"] == 1920
+
+
+def test_reused_frame_is_marked_used(tmp_path):
+    f = tmp_path / "moon.0001.jpg"
+    f.write_bytes(b"x")
+    os.utime(f, (0, 0))
+    core.download_file("https://unused", f)  # cached: no network
+    assert f.stat().st_mtime > 0
+
+
+def test_render_rejects_unknown_resolution(offline):
+    cache, _, _ = offline
+    with pytest.raises(ValueError, match="resolution must be one of"):
+        core.render_moon("2020-01-02 10:00", 35.78, -78.64, cache_dir=cache.root, resolution=1000)

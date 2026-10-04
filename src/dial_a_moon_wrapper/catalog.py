@@ -33,6 +33,12 @@ FIRST_YEAR = 2011
 NEXT_YEAR_CHECK_MONTH = 10
 UPDATE_CHECK_INTERVAL = timedelta(days=1)
 
+# Frame widths NASA renders the Moon at: the square 730x730 Dial-A-Moon
+# frame, and 16:9 Moon-only ("plain") frames. Not every year has every
+# size: 2011-2014 stop at 1920 and 2015 has no 3840.
+RESOLUTIONS = (730, 1920, 3840, 5760)
+HIGHRES = RESOLUTIONS[1:]
+
 # NASA annual Dial-A-Moon visualization IDs.
 #
 # These are deliberately kept here rather than trying to infer the
@@ -141,6 +147,28 @@ def find_frames_href(html: str, visualization_id: int) -> str:
     return sorted(candidates)[0]
 
 
+def find_highres_href(html: str, visualization_id: int, width: int) -> Optional[str]:
+    """
+    Return the href of the visualization's Moon-only 16:9 frame directory
+    at ``width``, or None if the year doesn't have that size.
+
+    2013 on use ``<W>x<H>_16x9_30p/plain/``; 2011-2012 keep their
+    Moon-only frames directly in ``1920x1080_16x9_60p/``. Sibling
+    folders (fancy, labels, distance, and 2012's partial 30p set) hold
+    composites or other graphics and are never matched.
+    """
+
+    vis_dir = f"a{visualization_id:06d}"
+    candidates = set(
+        re.findall(
+            rf'href="([^"]*/{vis_dir}/frames/{width}x\d+_16x9_\d+p/(?:plain/)?)"',
+            html,
+        )
+    )
+    plain = sorted(c for c in candidates if c.endswith("/plain/"))
+    return (plain or sorted(candidates) or [None])[0]
+
+
 def discover_json_url(year: int, visualization_id: int) -> str:
     """
     Retrieve the NASA visualization page and discover its annual
@@ -167,21 +195,49 @@ def _write_manifest(paths: CachePaths, manifest: dict[str, str]) -> None:
     _write_json(paths.frame_manifest, manifest)
 
 
-def frames_url(paths: CachePaths, year: int) -> str:
+def frames_url(paths: CachePaths, year: int, width: int = 730) -> Optional[str]:
     """
-    Return the 730x730 frame directory for ``year``, discovering and
+    Return the frame directory for ``year`` at ``width``, discovering and
     caching it in ``metadata/frames.json`` on first use.
+
+    For 730 a missing directory raises. For the high-resolution widths
+    the result is None when the year doesn't have that size; all three
+    are recorded from one page visit, keyed ``"<year>@<width>"``.
     """
 
     manifest = _read_manifest(paths)
-    key = str(year)
+    key = str(year) if width == 730 else f"{year}@{width}"
     if key not in manifest:
         vid = known_visualizations(paths).get(year)
         if vid is None:
             raise RuntimeError(f"No NASA visualization ID is known for {year}")
-        manifest[key] = discover_frames_url(vid)
+        page_url, html = _fetch_page(vid)
+        if width == 730:
+            manifest[key] = urljoin(page_url, find_frames_href(html, vid))
+        else:
+            for w in HIGHRES:
+                href = find_highres_href(html, vid, w)
+                manifest[f"{year}@{w}"] = urljoin(page_url, href) if href else ""
         _write_manifest(paths, manifest)
-    return manifest[key]
+    return manifest[key] or None
+
+
+def highres_image_url(
+    paths: CachePaths,
+    record: MoonRecord,
+    width: int,
+) -> tuple[Optional[str], int]:
+    """
+    URL and width of the largest Moon-only frame for ``record`` that is
+    no wider than ``width``, falling back through the smaller sizes the
+    year has. Returns (None, 730) when the year has none of them.
+    """
+
+    for w in sorted((w for w in HIGHRES if w <= width), reverse=True):
+        directory = frames_url(paths, record.year, w)
+        if directory:
+            return urljoin(directory, f"moon.{record.frame_number:04d}.tif"), w
+    return None, 730
 
 
 def _read_json(path: Path) -> dict:

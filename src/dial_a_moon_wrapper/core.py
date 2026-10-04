@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional, Union
@@ -36,7 +36,7 @@ from .geometry import (
     compute_observer_geometry,
     compute_target_geometry,
 )
-from .paths import CachePaths
+from .paths import DEFAULT_CACHE_TTL, CachePaths, prune_cache
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +79,8 @@ class MoonResult:
     orientation: Orientation
     rotation_degrees: float
     match_score: float
+    requested_resolution: int = 730
+    resolution: int = 730
     place: Optional[Place] = None
     image_url: Optional[str] = None
     source_image: Optional[Path] = None
@@ -103,6 +105,7 @@ class MoonResult:
                 "timezone": self.timezone,
                 "timezone_source": self.timezone_source,
                 "orientation": self.orientation,
+                "resolution": self.requested_resolution,
             },
             "status": self.status,
             "source": {
@@ -129,6 +132,7 @@ class MoonResult:
                 "above_horizon": self.above_horizon,
             },
             "rotation_degrees": self.rotation_degrees,
+            "resolution": self.resolution,
             "files": {
                 "image_url": self.image_url,
                 "source_image": _str(self.source_image),
@@ -263,6 +267,7 @@ def rotation_angle(
 
 def download_file(url: str, destination: Path) -> None:
     if destination.exists():
+        destination.touch()  # mark as used, for the cache TTL
         return
 
     log.info("Downloading %s", url)
@@ -296,22 +301,60 @@ def background_color(image: Image.Image, patch: int = 8) -> tuple[int, int, int]
     return tuple(int(v) for v in np.median(corners, axis=0))
 
 
+# Formats that can't store an alpha channel.
+_OPAQUE_SUFFIXES = {".jpg", ".jpeg", ".bmp"}
+
+
+def square_frame(image: Image.Image) -> Image.Image:
+    """
+    Normalize a NASA frame to a square, keeping NASA's background.
+
+    The 730x730 frames are already square RGB on black. The
+    high-resolution frames are 16:9 RGBA with a transparent background
+    and the Moon centered; they are cropped to a centered square of the
+    frame's height (the same framing as the 730 frames) and stay
+    transparent.
+    """
+
+    has_alpha = image.mode in ("RGBA", "LA") or "transparency" in image.info
+    image = image.convert("RGBA" if has_alpha else "RGB")
+
+    width, height = image.size
+    if width != height:
+        side = min(width, height)
+        left, top = (width - side) // 2, (height - side) // 2
+        image = image.crop((left, top, left + side, top + side))
+    return image
+
+
 def rotate_image(
     source_path: Path,
     destination_path: Path,
     angle_degrees: float,
-) -> None:
+) -> bool:
     """
     Rotate the NASA Moon image counter-clockwise around its center.
 
-    The image keeps NASA's dimensions (``expand=False``); the disk is
-    inset within the frame so nothing is clipped. Corners uncovered by
-    the rotation are filled with the frame's own background color
-    (pure black in every NASA year checked).
+    The image is never rescaled (``expand=False``); the disk is inset
+    within the frame so nothing is clipped. Corners uncovered by the
+    rotation match NASA's background: the frame's own black for the 730
+    frames, fully transparent for the high-resolution frames.
+
+    Returns True if a transparent frame had to be flattened onto black
+    because ``destination_path`` names a format without transparency.
     """
 
     with Image.open(source_path) as image:
-        image = image.convert("RGB")
+        image = square_frame(image)
+
+    if image.mode == "RGBA":
+        # Rotate premultiplied so edge pixels don't pick up dark fringes.
+        rotated = (
+            image.convert("RGBa")
+            .rotate(angle_degrees, resample=Image.Resampling.BICUBIC, expand=False)
+            .convert("RGBA")
+        )
+    else:
         rotated = image.rotate(
             angle_degrees,
             resample=Image.Resampling.BICUBIC,
@@ -319,8 +362,18 @@ def rotate_image(
             fillcolor=background_color(image),
         )
 
+    flattened = False
+    suffix = destination_path.suffix.lower()
+    if rotated.mode == "RGBA" and suffix in _OPAQUE_SUFFIXES:
+        black = Image.new("RGBA", rotated.size, (0, 0, 0, 255))
+        black.alpha_composite(rotated)
+        rotated = black.convert("RGB")
+        flattened = True
+
     destination_path.parent.mkdir(parents=True, exist_ok=True)
-    rotated.save(destination_path, quality=95)
+    options = {"quality": 95} if suffix in (".jpg", ".jpeg") else {}
+    rotated.save(destination_path, **options)
+    return flattened
 
 
 _catalog_cache: dict[tuple, Catalog] = {}
@@ -348,12 +401,14 @@ def render_moon(
     elevation: float = 0.0,
     timezone_name: Optional[str] = None,
     orientation: Orientation = "zenith",
+    resolution: int = 730,
     output: Optional[Union[str, os.PathLike]] = None,
     cache_dir: Optional[Union[str, os.PathLike]] = None,
     ephemeris_file: Optional[Union[str, os.PathLike]] = None,
     download_image: bool = True,
     auto_bootstrap: bool = True,
     check_updates: bool = True,
+    cache_ttl: Optional[timedelta] = DEFAULT_CACHE_TTL,
     write_json: bool = True,
 ) -> MoonResult:
     """
@@ -372,6 +427,10 @@ def render_moon(
             coordinates.
         orientation: ``"zenith"`` puts the observer's zenith at the top
             of the image, ``"north"`` keeps celestial north up.
+        resolution: NASA frame width to start from: 730 (default, the
+            square Dial-A-Moon frame) or 1920, 3840, 5760 (Moon-only frames,
+            cropped to a square of 1080, 2160 or 3240 px). If the source
+            year lacks that size, the largest smaller size it has is used.
         output: Where to write the rotated image. Defaults to the
             cache's ``results/`` directory.
         cache_dir: Cache root. See :mod:`dial_a_moon_wrapper.paths`.
@@ -381,8 +440,13 @@ def render_moon(
             geometry; no image is fetched or written.
         auto_bootstrap: Download NASA's annual metadata if none is cached.
         check_updates: Look for newly published years (at most daily).
+        cache_ttl: Delete cached NASA frames and generated images unused
+            for this long (checked at most daily). None disables pruning.
         write_json: Write a JSON sidecar next to the image.
     """
+
+    if resolution not in cat.RESOLUTIONS:
+        raise ValueError(f"resolution must be one of {cat.RESOLUTIONS}")
 
     paths = CachePaths.resolve(cache_dir).ensure()
 
@@ -402,6 +466,12 @@ def render_moon(
             cat.check_for_new_years(paths)
         except Exception as exc:  # never let the update check break a render
             log.info("Update check failed: %s", exc)
+
+    if cache_ttl is not None:
+        try:
+            prune_cache(paths, cache_ttl)
+        except Exception as exc:  # housekeeping must not break a render
+            log.info("Cache pruning failed: %s", exc)
 
     if isinstance(when, datetime) and when.tzinfo is not None:
         try:
@@ -470,6 +540,7 @@ def render_moon(
         orientation=orientation,
         rotation_degrees=rotation,
         match_score=score,
+        requested_resolution=resolution,
         place=resolved_place,
         notes=notes,
     )
@@ -477,19 +548,44 @@ def render_moon(
     if not download_image:
         return result
 
-    result.image_url = cat.image_url(paths, source)
-    result.source_image = (
-        paths.images / str(source.year) / f"moon.{source.frame_number:04d}.jpg"
-    )
+    url, used = None, 730
+    if resolution > 730:
+        try:
+            url, used = cat.highres_image_url(paths, source, resolution)
+        except Exception as exc:
+            log.info("High-resolution frames unavailable (%s); using 730", exc)
+    if used != resolution:
+        result.notes.append(
+            f"{source.year} frames are not published at {resolution}; "
+            f"used the next largest available size, {used}."
+        )
+    result.resolution = used
+
+    if used == 730:
+        result.image_url = cat.image_url(paths, source)
+        result.source_image = (
+            paths.images / str(source.year) / f"moon.{source.frame_number:04d}.jpg"
+        )
+    else:
+        result.image_url = url
+        result.source_image = (
+            paths.images / str(source.year) / str(used)
+            / f"moon.{source.frame_number:04d}.tif"
+        )
     download_file(result.image_url, result.source_image)
 
     if output is None:
-        output = paths.results / (
-            f"{utc_dt:%Y%m%dT%H%M%SZ}"
-            f"_{latitude:+.4f}_{longitude:+.4f}_{orientation}.jpg"
+        output = paths.results / orientation / str(used) / (
+            f"{utc_dt:%Y%m%dT%H%M%SZ}_{latitude:+.4f}_{longitude:+.4f}"
+            + (".jpg" if used == 730 else ".png")
         )
     result.image = Path(output)
-    rotate_image(result.source_image, result.image, rotation)
+    if rotate_image(result.source_image, result.image, rotation):
+        result.notes.append(
+            f"{result.image.suffix} can't store transparency, so the "
+            "high-resolution frame was placed on black. Use .png to keep "
+            "NASA's transparent background."
+        )
 
     if write_json:
         result.result_json = result.image.with_suffix(".json")
