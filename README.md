@@ -11,6 +11,11 @@ Images of the Moon as seen from a given place and time on Earth, built on NASA's
 - **Square output, disk centered:** black background at 730 px (JPEG), or
   transparent at high resolution (PNG), matching NASA's frames.
 
+| 2026-12-14, 9 PM local | NASA frame (north up) | As seen by the observer |
+|---|---|---|
+| Raleigh, NC | ![NASA frame](https://raw.githubusercontent.com/rtphokie/dial-a-moon-wrapper/main/docs/images/raleigh_nasa.jpg) | ![Raleigh view](https://raw.githubusercontent.com/rtphokie/dial-a-moon-wrapper/main/docs/images/raleigh_observer.jpg) |
+| Sydney, Australia | ![NASA frame](https://raw.githubusercontent.com/rtphokie/dial-a-moon-wrapper/main/docs/images/sydney_nasa.jpg) | ![Sydney view](https://raw.githubusercontent.com/rtphokie/dial-a-moon-wrapper/main/docs/images/sydney_observer.jpg) |
+
 ## Install
 
 ```bash
