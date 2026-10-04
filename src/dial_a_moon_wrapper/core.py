@@ -32,6 +32,7 @@ from .geocoding import Place, geocode
 from .geometry import (
     ObserverGeometry,
     TargetGeometry,
+    check_date_supported,
     compute_observer_geometry,
     compute_target_geometry,
 )
@@ -349,7 +350,7 @@ def render_moon(
     orientation: Orientation = "zenith",
     output: Optional[Union[str, os.PathLike]] = None,
     cache_dir: Optional[Union[str, os.PathLike]] = None,
-    ephemeris: Optional[str] = None,
+    ephemeris_file: Optional[Union[str, os.PathLike]] = None,
     download_image: bool = True,
     auto_bootstrap: bool = True,
     check_updates: bool = True,
@@ -374,7 +375,8 @@ def render_moon(
         output: Where to write the rotated image. Defaults to the
             cache's ``results/`` directory.
         cache_dir: Cache root. See :mod:`dial_a_moon_wrapper.paths`.
-        ephemeris: Skyfield ephemeris name or path (default de421.bsp).
+        ephemeris_file: Path to a local copy of JPL's de421.bsp, used as-is.
+            By default it is found in, or downloaded to, the cache.
         download_image: If False, only select the frame and compute the
             geometry; no image is fetched or written.
         auto_bootstrap: Download NASA's annual metadata if none is cached.
@@ -416,11 +418,13 @@ def render_moon(
     else:
         local_dt, utc_dt = resolve_datetime(when, tz_name)
 
+    check_date_supported(utc_dt, paths.root, ephemeris_file)
+
     catalog = load_catalog(paths)
     notes: list[str] = []
 
     exact = catalog.exact(utc_dt)
-    target = compute_target_geometry(utc_dt, paths.root, ephemeris)
+    target = compute_target_geometry(utc_dt, paths.root, ephemeris_file)
 
     if exact is not None:
         source, score, status = exact, 0.0, "official"
@@ -439,7 +443,7 @@ def render_moon(
     log.info("Source: %s frame %s/%s", status, source.year, source.frame_number)
 
     observer = compute_observer_geometry(
-        utc_dt, latitude, longitude, elevation, paths.root, ephemeris
+        utc_dt, latitude, longitude, elevation, paths.root, ephemeris_file
     )
     if observer.altitude <= 0.0:
         notes.append("The Moon is below the observer's horizon.")

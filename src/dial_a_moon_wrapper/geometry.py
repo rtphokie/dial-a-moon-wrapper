@@ -1,5 +1,5 @@
 """
-Lunar geometry computed locally with Skyfield.
+Lunar geometry computed locally with Skyfield and JPL's DE421 ephemeris.
 
 NASA's annual files only cover the years NASA has published. To pick a
 stand-in frame for any other date we need the same quantities NASA
@@ -18,11 +18,16 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
-DEFAULT_EPHEMERIS = "de421.bsp"
+# DE421 is required: NASA computes its Dial-A-Moon renderings from it too.
+EPHEMERIS = "de421.bsp"
+
+# Keep requests a day inside the file's coverage: apparent positions look
+# back in time by the light-travel time (~8 minutes for the Sun).
+_RANGE_MARGIN = timedelta(days=1)
 
 # Inclination of the mean lunar equator to the ecliptic (Meeus 53).
 _INCLINATION = math.radians(1.54242)
@@ -54,42 +59,64 @@ def _wrap180(degrees: float) -> float:
 
 
 @lru_cache(maxsize=4)
-def _load(ephemeris_dir: str, ephemeris_name: str):
+def _load(directory: str, filename: str):
     from skyfield.api import Loader
 
-    directory = Path(ephemeris_dir)
+    loader = Loader(directory, verbose=False)
+    return loader.timescale(), loader(filename)
 
-    # Reuse an ephemeris sitting next to the cache (e.g. /var/data/de421.bsp)
-    # rather than downloading a second copy.
-    if (
-        not (directory / ephemeris_name).exists()
-        and (directory.parent / ephemeris_name).exists()
-    ):
+
+def load_ephemeris(
+    cache_root: Path,
+    ephemeris_file: str | os.PathLike | None = None,
+):
+    """
+    Return (timescale, DE421 ephemeris).
+
+    ``ephemeris_file`` (or the ``DIALAMOON_EPHEMERIS`` environment
+    variable) is a local copy of de421.bsp and is used as-is. Otherwise
+    de421.bsp is taken from ``cache_root`` or its parent directory (e.g.
+    an existing /var/data/de421.bsp), and downloaded into ``cache_root``
+    on first use.
+    """
+
+    given = ephemeris_file or os.environ.get("DIALAMOON_EPHEMERIS")
+    if given:
+        path = Path(given).expanduser().resolve()
+        return _load(str(path.parent), path.name)
+
+    directory = Path(cache_root)
+    if not (directory / EPHEMERIS).exists() and (directory.parent / EPHEMERIS).exists():
         directory = directory.parent
-
-    loader = Loader(str(directory), verbose=False)
-    return loader.timescale(), loader(ephemeris_name)
+    return _load(str(directory), EPHEMERIS)
 
 
-def load_ephemeris(cache_root: Path, ephemeris: str | None = None):
-    """
-    Return (timescale, ephemeris).
+def ephemeris_range(
+    cache_root: Path,
+    ephemeris_file: str | os.PathLike | None = None,
+) -> tuple[datetime, datetime]:
+    """UTC span the loaded ephemeris can serve (DE421: 1899-07-29 to 2053-10-09)."""
 
-    ``ephemeris`` may be a file name (downloaded into ``cache_root`` on
-    first use) or a path to an existing .bsp file. The
-    ``DIALAMOON_EPHEMERIS`` environment variable is used when it is not
-    given.
-    """
+    ts, eph = load_ephemeris(cache_root, ephemeris_file)
+    segments = [s.spk_segment for s in eph.segments]
+    first = ts.tdb_jd(max(s.start_jd for s in segments)).utc_datetime()
+    last = ts.tdb_jd(min(s.end_jd for s in segments)).utc_datetime()
+    return first + _RANGE_MARGIN, last - _RANGE_MARGIN
 
-    ephemeris = ephemeris or os.environ.get(
-        "DIALAMOON_EPHEMERIS", DEFAULT_EPHEMERIS
-    )
-    path = Path(ephemeris).expanduser()
 
-    if path.parent != Path(".") or path.is_absolute():
-        return _load(str(path.parent.resolve()), path.name)
+def check_date_supported(
+    utc_dt: datetime,
+    cache_root: Path,
+    ephemeris_file: str | os.PathLike | None = None,
+) -> None:
+    """Raise ValueError if ``utc_dt`` is outside the ephemeris coverage."""
 
-    return _load(str(cache_root), ephemeris)
+    first, last = ephemeris_range(cache_root, ephemeris_file)
+    if not first <= utc_dt <= last:
+        raise ValueError(
+            f"{utc_dt:%Y-%m-%d %H:%M} UTC is outside the DE421 ephemeris range "
+            f"({first:%Y-%m-%d} to {last:%Y-%m-%d})"
+        )
 
 
 def _selenographic(
@@ -126,12 +153,12 @@ def _selenographic(
 def compute_target_geometry(
     utc_dt: datetime,
     cache_root: Path,
-    ephemeris: str | None = None,
+    ephemeris_file: str | os.PathLike | None = None,
 ) -> TargetGeometry:
     from skyfield.framelib import ecliptic_frame
     from skyfield.nutationlib import iau2000b_radians
 
-    ts, eph = load_ephemeris(cache_root, ephemeris)
+    ts, eph = load_ephemeris(cache_root, ephemeris_file)
     t = ts.from_datetime(utc_dt)
     earth, moon, sun = eph["earth"], eph["moon"], eph["sun"]
 
@@ -242,11 +269,11 @@ def compute_observer_geometry(
     longitude: float,
     elevation: float,
     cache_root: Path,
-    ephemeris: str | None = None,
+    ephemeris_file: str | os.PathLike | None = None,
 ) -> ObserverGeometry:
     from skyfield.api import wgs84
 
-    ts, eph = load_ephemeris(cache_root, ephemeris)
+    ts, eph = load_ephemeris(cache_root, ephemeris_file)
     t = ts.from_datetime(utc_dt)
     site = eph["earth"] + wgs84.latlon(
         latitude, longitude, elevation_m=elevation

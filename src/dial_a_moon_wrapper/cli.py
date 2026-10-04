@@ -47,7 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--cache-dir", help="Cache root (default: $DIALAMOON_CACHE, "
         "/var/data/dialamoon, or the system temp dir)."
     )
-    parser.add_argument("--ephemeris", help="Skyfield ephemeris name or .bsp path.")
+    parser.add_argument(
+        "--ephemeris-file",
+        help="Path to an existing copy of JPL's de421.bsp (default: found in or "
+        "downloaded to the cache).",
+    )
     parser.add_argument(
         "--no-image",
         action="store_true",
@@ -111,7 +115,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             orientation=args.orientation,
             output=args.output,
             cache_dir=paths.root,
-            ephemeris=args.ephemeris,
+            ephemeris_file=args.ephemeris_file,
             download_image=not args.no_image,
         )
     except Exception as exc:  # surface a clean message on the CLI

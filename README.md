@@ -63,7 +63,7 @@ Give either `PLACE` or both `--latitude` and `--longitude`; everything else is o
 | `--orientation`             | `zenith` (default) or `north`.                                                                                                       |
 | `-o`, `--output`            | Image path. Defaults to `<cache>/results/`.                                                                                          |
 | `--cache-dir`               | Cache root (optional)                                                                                                                |
-| `--ephemeris`               | ephemeris or path to a `.bsp` (default `de421.bsp`).                                                                                 |
+| `--ephemeris-file`          | Path to an existing copy of JPL's `de421.bsp`. Optional; it's otherwise downloaded once (~17 MB) and cached.                         |
 | `--no-image`                | Select the frame and compute geometry only. Downloads no image.                                                                      |
 | `--json`                    | Print the full result as JSON.                                                                                                       |
 | `--bootstrap`               | Refresh NASA metadata (`--force-bootstrap` re-downloads it; `--bootstrap-only` refreshes and exits).                                 |
@@ -110,7 +110,7 @@ render_moon(None, 35.78, -78.64, download_image=False)
 ```
 
 `render_moon` keyword arguments mirror the CLI: `place`, `elevation`, `timezone_name`,
-`orientation`, `output`, `cache_dir`, `ephemeris`, `download_image`,
+`orientation`, `output`, `cache_dir`, `ephemeris_file`, `download_image`,
 `auto_bootstrap`, `check_updates`, `write_json`.
 
 ## Place names
@@ -137,7 +137,9 @@ geocode("Tokyo, Japan", CachePaths.resolve())  # Place(..., latitude=35.68, long
 ```
 
 The first run downloads about 16 annual JSON files (roughly 2 MB each) and the
-ephemeris. The Skyfield package will also cache the ephemeris file for its calculations.
+JPL DE421 ephemeris (`de421.bsp`, ~17 MB), the only ephemeris used.
+An existing copy is reused if it sits in the cache directory or the directory above it,
+or if you point `--ephemeris-file` / `DIALAMOON_EPHEMERIS` at it.
 Each NASA image frame is downloaded the first time it's needed and cached for
 reuse, and the script begins looking for the following year's metadata file in October.
 
@@ -176,6 +178,8 @@ is dropped for `--orientation north`.
   is not reflected in the imagery.
 - The disk size of a substituted frame reflects the source frame's distance.
   That distance is part of the match, so it's usually close.
+- Dates must fall within DE421's coverage, 1899-07-29 to 2053-10-07 (a day
+  inside the file's limits). Requests outside it raise a `ValueError`.
 - Lunar eclipses are not handled specially. Requests resolve to the nearest
   hourly frame, not NASA's minute-by-minute eclipse renderings.
 - New years are found through NASA's Dial-A-Moon API and the SVS page layout.

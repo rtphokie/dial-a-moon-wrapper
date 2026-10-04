@@ -139,8 +139,9 @@ def offline(monkeypatch, populated_cache):
     monkeypatch.setattr(
         core,
         "compute_target_geometry",
-        lambda utc_dt, root, eph=None: target_from(future_match, posangle=25.0),
+        lambda utc_dt, root, ephemeris_file=None: target_from(future_match, posangle=25.0),
     )
+    monkeypatch.setattr(core, "check_date_supported", lambda *a, **k: None)
     monkeypatch.setattr(
         core,
         "compute_observer_geometry",

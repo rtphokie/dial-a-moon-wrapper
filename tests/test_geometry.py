@@ -51,3 +51,42 @@ def test_observer_geometry_is_plain_floats(ephemeris_root):
     )
     assert all(type(v) is float for v in (o.altitude, o.azimuth, o.parallactic_angle))
     assert -90 <= o.altitude <= 90 and 0 <= o.azimuth < 360
+
+
+def test_ephemeris_resolution(tmp_path, monkeypatch):
+    from dial_a_moon_wrapper import geometry
+
+    calls = []
+    monkeypatch.setattr(geometry, "_load", lambda d, f: calls.append((d, f)))
+    monkeypatch.delenv("DIALAMOON_EPHEMERIS", raising=False)
+    root = tmp_path / "data" / "dialamoon"
+    root.mkdir(parents=True)
+
+    geometry.load_ephemeris(root)  # nothing local: download into the cache
+    (tmp_path / "data" / "de421.bsp").write_bytes(b"")
+    geometry.load_ephemeris(root)  # reuse a copy next to the cache
+    geometry.load_ephemeris(root, tmp_path / "mine" / "jpl.bsp")  # explicit file, used as-is
+    monkeypatch.setenv("DIALAMOON_EPHEMERIS", str(tmp_path / "env.bsp"))
+    geometry.load_ephemeris(root)
+
+    assert calls == [
+        (str(root), "de421.bsp"),
+        (str(tmp_path / "data"), "de421.bsp"),
+        (str((tmp_path / "mine").resolve()), "jpl.bsp"),
+        (str(tmp_path.resolve()), "env.bsp"),
+    ]
+
+
+@pytest.mark.ephemeris
+def test_de421_range(ephemeris_root):
+    from dial_a_moon_wrapper.geometry import check_date_supported, ephemeris_range
+
+    first, last = ephemeris_range(ephemeris_root)
+    assert first.date().isoformat() == "1899-07-29" or first.date().isoformat() == "1899-07-30"
+    assert last.date().isoformat() in ("2053-10-07", "2053-10-08")
+
+    check_date_supported(datetime(1900, 1, 1, tzinfo=timezone.utc), ephemeris_root)
+    check_date_supported(datetime(2053, 1, 1, tzinfo=timezone.utc), ephemeris_root)
+    for bad in (datetime(1899, 7, 1, tzinfo=timezone.utc), datetime(2060, 1, 1, tzinfo=timezone.utc)):
+        with pytest.raises(ValueError, match="outside the DE421 ephemeris range"):
+            check_date_supported(bad, ephemeris_root)
