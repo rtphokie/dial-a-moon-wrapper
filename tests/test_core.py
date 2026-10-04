@@ -37,7 +37,7 @@ def test_parse_local_datetime_rejects_garbage():
 
 
 def test_detect_timezone():
-    assert core.detect_timezone(35.78, -78.64, None) == ("America/New_York", "timezonefinder")
+    assert core.detect_timezone(35.78, -78.64, None) == ("America/New_York", "location")
     assert core.detect_timezone(0, 0, "Europe/Paris") == ("Europe/Paris", "user")
     with pytest.raises(Exception):
         core.detect_timezone(0, 0, "Not/AZone")
@@ -91,6 +91,26 @@ def test_rotation_angle():
     assert core.rotation_angle(0.0, 0.0, -190.0, "zenith") == pytest.approx(-170.0)
     with pytest.raises(ValueError):
         core.rotation_angle(0, 0, 0, "south")
+
+
+def test_rotate_image_keeps_size_and_background(tmp_path):
+    src = tmp_path / "in.jpg"
+    img = Image.new("RGB", (730, 730), (0, 0, 0))
+    img.paste((180, 180, 180), (165, 165, 565, 565))  # a "Moon" inset in black sky
+    img.save(src, quality=95)
+
+    out = tmp_path / "out.jpg"
+    core.rotate_image(src, out, 37.0)
+    rotated = Image.open(out)
+    assert rotated.size == (730, 730)
+    corners = np.asarray(rotated)[:10, :10]
+    assert corners.max() <= 2  # JPEG noise only; fill matches NASA black
+
+
+def test_background_color_follows_source():
+    img = Image.new("RGB", (100, 100), (3, 4, 5))
+    img.paste((200, 200, 200), (30, 30, 70, 70))
+    assert core.background_color(img) == (3, 4, 5)
 
 
 def test_rotate_image_direction(tmp_path):
@@ -195,7 +215,7 @@ def test_aware_datetime_over_ocean_falls_back_to_utc(offline):
     result = core.render_moon(
         datetime(2020, 1, 2, 3, tzinfo=UTC), 0.0, -140.0, cache_dir=cache.root, download_image=False
     )
-    assert result.timezone in ("UTC", "Etc/GMT+9")  # timezonefinder may return an ocean zone
+    assert result.timezone in ("UTC", "Etc/GMT+9")  # ocean coordinates may map to an Etc/ zone
 
 
 # --- place names ---------------------------------------------------------

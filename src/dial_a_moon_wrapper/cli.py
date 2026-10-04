@@ -130,7 +130,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"Place:    {result.place.name} ({result.latitude:.4f}, {result.longitude:.4f})")
     print(f"Local:    {result.local_datetime.isoformat()}")
     print(f"UTC:      {result.utc_datetime.isoformat()}")
-    print(f"Zone:     {result.timezone} ({result.timezone_source})")
+    print(f"Zone:     {result.timezone}")
     print(f"Status:   {result.status}")
     print(f"Source:   {src.year} frame {src.frame_number} ({src.time_utc.isoformat()})")
     print(f"Phase:    {src.phase:.1f}% illuminated")

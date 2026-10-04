@@ -14,10 +14,13 @@ This package adds two things:
    at the given latitude/longitude actually sees, with the zenith at the top of
    the image (or celestial north, if you prefer).
 2. **Coverage outside NASA's years.** For a date NASA hasn't rendered (before
-   2011, or next year before NASA publishes it), the lunar geometry is computed
+   2011, or years after the current one), the lunar geometry is computed
    locally with [Skyfield](https://rhodesmill.org/skyfield/). The cached NASA
    frame whose sub-Earth point, sub-solar point and distance are closest is
-   then used, rotated to the computed position angle.
+   then used, rotated to the computed position angle. Note: the NASA SVS team
+   generally publishes the following year's images and metadata each November.
+   Beginning in October the package checks for them (at most once a day) and
+   updates the local cache automatically.
 
 ## Installation
 
@@ -48,30 +51,30 @@ dial-a-moon --datetime "2031-03-08 03:00" --latitude -33.87 --longitude 151.21 \
 dial-a-moon --bootstrap-only -v
 ```
 
-`python -m dial_a_moon_wrapper ...` works the same way.
+Give either `PLACE` or both `--latitude` and `--longitude`; everything else is optional.
 
-| Option | Meaning |
-| --- | --- |
-| `--datetime` | Local wall-clock time at the observer (`YYYY-MM-DD HH:MM` or ISO 8601). Defaults to now. An ISO string with an offset is used as-is. |
-| `PLACE` (positional) | Place name such as `"Raleigh, NC"`, `"Paris, France"` or `"Mauna Kea"`. A `"lat, lon"` string also works. |
-| `--latitude`, `--longitude` | Degrees, north and east positive. Use these *or* a place name. |
-| `--elevation` | Meters above sea level (default 0). |
-| `--timezone` | IANA zone override. Normally looked up from the coordinates. |
-| `--orientation` | `zenith` (default) or `north`. |
-| `-o`, `--output` | Image path. Defaults to `<cache>/results/`. |
-| `--cache-dir` | Cache root (see below). |
-| `--ephemeris` | Skyfield ephemeris name or path to a `.bsp` (default `de421.bsp`). |
-| `--no-image` | Select the frame and compute geometry only. Downloads no image. |
-| `--json` | Print the full result as JSON. |
-| `--bootstrap`, `--force-bootstrap`, `--bootstrap-only` | Refresh NASA metadata. |
-| `-v` | Log progress to stderr. |
+| Option                      | Purpose                                                                                                                              |
+|-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `--datetime`                | Local wall-clock time at the observer (`YYYY-MM-DD HH:MM` or ISO 8601). Defaults to now. An ISO string with an offset is used as-is. |
+| `PLACE`                     | Observer's city and state or province such as `"Raleigh, NC"`, `"Paris, France"` or `"Mauna Kea"`. A `"lat, lon"` string also works. |
+| `--latitude`, `--longitude` | Degrees, north and east positive. Use these *or* a place name.                                                                       |
+| `--elevation`               | Meters above sea level (default 0).                                                                                                  |
+| `--timezone`                | IANA zone override. (default determined from coordinates).                                                                           |
+| `--orientation`             | `zenith` (default) or `north`.                                                                                                       |
+| `-o`, `--output`            | Image path. Defaults to `<cache>/results/`.                                                                                          |
+| `--cache-dir`               | Cache root (optional)                                                                                                                |
+| `--ephemeris`               | ephemeris or path to a `.bsp` (default `de421.bsp`).                                                                                 |
+| `--no-image`                | Select the frame and compute geometry only. Downloads no image.                                                                      |
+| `--json`                    | Print the full result as JSON.                                                                                                       |
+| `--bootstrap`               | Refresh NASA metadata (`--force-bootstrap` re-downloads it; `--bootstrap-only` refreshes and exits).                                 |
+| `-v`                        | Log progress to stderr.                                                                                                              |
 
 Example output:
 
 ```
 Local:    2031-03-08T03:00:00-05:00
 UTC:      2031-03-08T08:00:00+00:00
-Zone:     America/New_York (timezonefinder)
+Zone:     America/New_York
 Status:   estimated
 Source:   2013 frame 1321 (2013-02-25T00:00:00+00:00)
 Phase:    99.0% illuminated
@@ -89,14 +92,14 @@ from dial_a_moon_wrapper import render_moon
 result = render_moon("2026-10-04 21:30", place="Raleigh, NC")
 # or: render_moon("2026-10-04 21:30", latitude=35.78, longitude=-78.64)
 
-result.image            # Path to the rotated JPEG
-result.status           # "official" (exact NASA frame) or "estimated"
-result.source           # MoonRecord: NASA frame metadata (phase, age, libration, ...)
-result.place           # Place(name, latitude, longitude, ...) when a place was given
-result.observer         # altitude, azimuth, parallactic_angle
-result.above_horizon    # bool
-result.rotation_degrees # counter-clockwise rotation applied to NASA's frame
-result.to_dict()        # JSON-serializable summary (also written next to the image)
+result.image  # Path to the rotated JPEG
+result.status  # "official" (exact NASA frame) or "estimated"
+result.source  # MoonRecord: NASA frame metadata (phase, age, libration, ...)
+result.place  # Place(name, latitude, longitude, ...) when a place was given
+result.observer  # altitude, azimuth, parallactic_angle
+result.above_horizon  # bool
+result.rotation_degrees  # counter-clockwise rotation applied to NASA's frame
+result.to_dict()  # JSON-serializable summary (also written next to the image)
 
 # Aware datetimes are used as-is; naive ones are local time at the observer.
 render_moon(datetime(2040, 1, 1, 6, tzinfo=timezone.utc), 64.15, -21.94,
@@ -108,7 +111,7 @@ render_moon(None, 35.78, -78.64, download_image=False)
 
 `render_moon` keyword arguments mirror the CLI: `place`, `elevation`, `timezone_name`,
 `orientation`, `output`, `cache_dir`, `ephemeris`, `download_image`,
-`auto_bootstrap`, `write_json`.
+`auto_bootstrap`, `check_updates`, `write_json`.
 
 ## Place names
 
@@ -129,33 +132,14 @@ You can also geocode on its own:
 
 ```python
 from dial_a_moon_wrapper import CachePaths, geocode
-geocode("Tokyo, Japan", CachePaths.resolve())   # Place(..., latitude=35.68, longitude=139.76)
-```
 
-## Cache
-
-All downloads are cached and shared by every script on the machine that uses
-this package. The cache root is chosen in this order:
-
-1. `cache_dir=` / `--cache-dir`
-2. the `DIALAMOON_CACHE` environment variable
-3. `/var/data/dialamoon`, if `/var/data` exists and is writable
-4. `<system temp>/dialamoon`, from `tempfile.gettempdir()`: `$TMPDIR` or `/tmp`
-   on macOS/Linux, `%TEMP%` on Windows
-
-```
-dialamoon/
-  metadata/   mooninfo_2011.json ... mooninfo_<year>.json, frames.json, geocode.json
-  images/     <year>/moon.NNNN.jpg   (NASA source frames, fetched on demand)
-  results/    rotated images and JSON sidecars
-  de421.bsp   JPL ephemeris (~17 MB, fetched on first use)
+geocode("Tokyo, Japan", CachePaths.resolve())  # Place(..., latitude=35.68, longitude=139.76)
 ```
 
 The first run downloads about 16 annual JSON files (roughly 2 MB each) and the
-ephemeris. After that, lookups need no network access except to fetch an image
-frame that isn't cached yet. If a `de421.bsp` already sits in the cache's
-parent directory (e.g. `/var/data/de421.bsp`), it is reused. You can also point
-`DIALAMOON_EPHEMERIS` at an existing `.bsp`.
+ephemeris. The Skyfield package will also cache the ephemeris file for its calculations.
+Each NASA image frame is downloaded the first time it's needed and cached for
+reuse, and the script begins looking for the following year's metadata file in October.
 
 ## How it works
 
@@ -166,11 +150,11 @@ selenographic coordinates, distance and position angle are computed for the
 exact instant (Skyfield + Meeus, *Astronomical Algorithms* ch. 53). The
 cached frame minimizing a weighted distance is then chosen:
 
-| Quantity | Scale |
-| --- | --- |
-| sub-Earth longitude / latitude | 5° / 3° |
+| Quantity                       | Scale       |
+|--------------------------------|-------------|
+| sub-Earth longitude / latitude | 5° / 3°     |
 | sub-solar longitude / latitude | 10° / 0.75° |
-| distance | 15,000 km |
+| distance                       | 15,000 km   |
 
 The locally computed geometry agrees with NASA's published values to within
 about 0.04° in libration, 1 km in distance and 0.2° in position angle
@@ -194,8 +178,9 @@ is dropped for `--orientation north`.
   That distance is part of the match, so it's usually close.
 - Lunar eclipses are not handled specially. Requests resolve to the nearest
   hourly frame, not NASA's minute-by-minute eclipse renderings.
-- `ANNUAL_VISUALIZATIONS` in `catalog.py` must be updated by hand when NASA
-  publishes a new year.
+- New years are found through NASA's Dial-A-Moon API and the SVS page layout.
+  If NASA changes either, a new year may not be picked up automatically; add
+  its visualization ID to `ANNUAL_VISUALIZATIONS` in `catalog.py`.
 
 ## Development
 
@@ -205,11 +190,30 @@ pytest                       # offline unit tests + ephemeris accuracy tests
 pytest --run-network         # also check live NASA SVS URLs
 ```
 
+## License
+
+MIT. See [LICENSE](LICENSE). This covers the code only; NASA imagery and
+OpenStreetMap data carry their own terms, below.
+
 ## Credits
 
 Geocoding: © OpenStreetMap contributors, via Nominatim (ODbL).
 
-Imagery and metadata: NASA's Scientific Visualization Studio, Ernie Wright et
-al., *Moon Phase and Libration*. NASA imagery is generally not subject to
-copyright in the United States. See [NASA's media usage
+Imagery and metadata: NASA's Scientific Visualization Studio, *Moon Phase and
+Libration* (visualizer Ernie Wright, USRA; planetary scientist Noah Petro,
+NASA/GSFC; producer James Tralie, eMITS).
+
+Lunar surface data: NASA/Lunar Reconnaissance Orbiter (LRO). The renderings
+use the LROC Wide Angle Camera natural-color mosaic (NASA/GSFC/Arizona State
+University) and Lunar Orbiter Laser Altimeter (LOLA) elevation data
+(NASA/GSFC).
+
+Ephemeris: JPL DE421 planetary and lunar ephemeris, NASA/Jet Propulsion
+Laboratory (Folkner, Williams & Boggs, *The Planetary and Lunar Ephemeris
+DE 421*, IPN Progress Report 42-178, 2009). NASA's Dial-A-Moon renderings are
+computed from DE421 as well. Positions are computed with
+[Skyfield](https://rhodesmill.org/skyfield/) by Brandon Rhodes.
+
+NASA imagery is generally not subject to copyright in the United States. See
+[NASA's media usage
 guidelines](https://www.nasa.gov/nasa-brand-center/images-and-media/).

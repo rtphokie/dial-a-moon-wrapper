@@ -166,7 +166,7 @@ def detect_timezone(
             "Use --timezone to specify an IANA timezone."
         )
 
-    return timezone_name, "timezonefinder"
+    return timezone_name, "location"
 
 
 def parse_local_datetime(
@@ -280,6 +280,21 @@ def download_file(url: str, destination: Path) -> None:
     temporary.replace(destination)
 
 
+def background_color(image: Image.Image, patch: int = 8) -> tuple[int, int, int]:
+    """Median color of the four corner patches of an RGB image."""
+
+    a = np.asarray(image)
+    corners = np.concatenate(
+        [
+            a[:patch, :patch],
+            a[:patch, -patch:],
+            a[-patch:, :patch],
+            a[-patch:, -patch:],
+        ]
+    ).reshape(-1, 3)
+    return tuple(int(v) for v in np.median(corners, axis=0))
+
+
 def rotate_image(
     source_path: Path,
     destination_path: Path,
@@ -288,16 +303,19 @@ def rotate_image(
     """
     Rotate the NASA Moon image counter-clockwise around its center.
 
-    The disk is inset within the frame, so ``expand=False`` never clips
-    the Moon; uncovered corners are filled black to match the sky.
+    The image keeps NASA's dimensions (``expand=False``); the disk is
+    inset within the frame so nothing is clipped. Corners uncovered by
+    the rotation are filled with the frame's own background color
+    (pure black in every NASA year checked).
     """
 
     with Image.open(source_path) as image:
-        rotated = image.convert("RGB").rotate(
+        image = image.convert("RGB")
+        rotated = image.rotate(
             angle_degrees,
             resample=Image.Resampling.BICUBIC,
             expand=False,
-            fillcolor=(0, 0, 0),
+            fillcolor=background_color(image),
         )
 
     destination_path.parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +352,7 @@ def render_moon(
     ephemeris: Optional[str] = None,
     download_image: bool = True,
     auto_bootstrap: bool = True,
+    check_updates: bool = True,
     write_json: bool = True,
 ) -> MoonResult:
     """
@@ -359,6 +378,7 @@ def render_moon(
         download_image: If False, only select the frame and compute the
             geometry; no image is fetched or written.
         auto_bootstrap: Download NASA's annual metadata if none is cached.
+        check_updates: Look for newly published years (at most daily).
         write_json: Write a JSON sidecar next to the image.
     """
 
@@ -375,6 +395,11 @@ def render_moon(
 
     if auto_bootstrap and not cat.has_metadata(paths):
         cat.bootstrap_metadata(paths)
+    elif check_updates:
+        try:
+            cat.check_for_new_years(paths)
+        except Exception as exc:  # never let the update check break a render
+            log.info("Update check failed: %s", exc)
 
     if isinstance(when, datetime) and when.tzinfo is not None:
         try:

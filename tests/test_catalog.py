@@ -134,6 +134,211 @@ def test_download_rejects_bad_json_without_clobbering(cache, monkeypatch):
     assert cache.metadata_file(2019).read_text() == before
 
 
-def test_unknown_year_raises(cache):
-    with pytest.raises(RuntimeError, match="No NASA visualization ID"):
-        cat.download_annual_json(cache, 1999)
+def test_unpublished_year_raises(cache, monkeypatch):
+    monkeypatch.setattr(cat, "SESSION", ApiSession({2026: 5587}))
+    with pytest.raises(RuntimeError, match="has not published 2027"):
+        cat.download_annual_json(cache, 2027)
+
+
+# --- automatic new-year check -------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+
+
+class ApiSession:
+    """Fake NASA: the Dial-A-Moon API plus visualization pages and JSON."""
+
+    def __init__(self, published: dict[int, int]):
+        self.published = published  # year -> visualization id
+        self.calls = []
+
+    def get(self, url, timeout=None, **_):
+        self.calls.append(url)
+        if "/api/dialamoon/" in url:
+            year = int(url.rsplit("/", 1)[1][:4])
+            if year in self.published:
+                vid = self.published[year]
+                return FakeResponse(payload={
+                    "time": f"{year}-01-01T00:00",
+                    "image": {"url": f"https://svs.gsfc.nasa.gov/vis/a000000/a005600/a{vid:06d}/frames/730x730_1x1_30p/moon.0001.jpg"},
+                })
+            last = max(self.published)
+            return FakeResponse(payload={
+                "time": f"{last}-12-31T23:00",
+                "image": {"url": "https://svs.gsfc.nasa.gov/vis/a000000/a005500/a005587/frames/730x730_1x1_30p/moon.8760.jpg"},
+            })
+        if url.endswith(".json"):
+            year = int(url.rsplit("_", 1)[1][:4])
+            return FakeResponse(payload=[make_nasa_item(datetime(year, 1, 1, tzinfo=UTC))])
+        vid = int(url.rstrip("/").rsplit("/", 1)[1])
+        year = next(y for y, v in self.published.items() if v == vid)
+        return FakeResponse(text=(
+            f'<a href="/vis/a000000/a005600/a{vid:06d}/mooninfo_{year}.json">JSON</a>'
+            f'<a href="/vis/a000000/a005600/a{vid:06d}/frames/730x730_1x1_30p/">frames</a>'
+        ))
+
+
+def test_discover_visualization_id(monkeypatch):
+    monkeypatch.setattr(cat, "SESSION", ApiSession({2026: 5587, 2027: 5650}))
+    assert cat.discover_visualization_id(2027) == 5650
+    monkeypatch.setattr(cat, "SESSION", ApiSession({2026: 5587}))
+    assert cat.discover_visualization_id(2027) is None  # API clamps to 2026
+
+
+def test_no_next_year_check_before_october(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    session = ApiSession({2026: 5587, 2027: 5650})
+    monkeypatch.setattr(cat, "SESSION", session)
+    assert cat.check_for_new_years(cache, now=datetime(2026, 9, 30, tzinfo=UTC)) == []
+    assert session.calls == []
+
+
+def test_next_year_found_in_october_and_cached(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    monkeypatch.setattr(cat, "SESSION", ApiSession({2026: 5587, 2027: 5650}))
+
+    added = cat.check_for_new_years(cache, now=datetime(2026, 10, 4, tzinfo=UTC))
+
+    assert added == [2027]
+    assert cache.metadata_file(2027).exists()
+    assert cat.known_visualizations(cache)[2027] == 5650
+    assert json.loads(cache.frame_manifest.read_text())["2027"].endswith("/a005650/frames/730x730_1x1_30p/")
+
+
+def test_check_runs_at_most_once_per_day(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    session = ApiSession({2026: 5587})  # 2027 not yet published
+    monkeypatch.setattr(cat, "SESSION", session)
+    t0 = datetime(2026, 10, 4, 8, tzinfo=UTC)
+
+    assert cat.check_for_new_years(cache, now=t0) == []
+    assert len(session.calls) == 1
+
+    cat.check_for_new_years(cache, now=t0 + timedelta(hours=23, minutes=59))
+    assert len(session.calls) == 1  # throttled
+
+    cat.check_for_new_years(cache, now=t0 + timedelta(days=1))
+    assert len(session.calls) == 2  # next day: checks again
+
+
+def test_failed_check_still_throttled(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+
+    class Down:
+        calls = 0
+
+        def get(self, *a, **k):
+            Down.calls += 1
+            raise ConnectionError("NASA unreachable")
+
+    monkeypatch.setattr(cat, "SESSION", Down())
+    t0 = datetime(2026, 11, 1, tzinfo=UTC)
+    assert cat.check_for_new_years(cache, now=t0) == []
+    cat.check_for_new_years(cache, now=t0 + timedelta(hours=2))
+    assert Down.calls == 1
+
+
+def test_no_check_when_everything_cached(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    write_year(cache, 2027, hours=1)
+    session = ApiSession({2026: 5587, 2027: 5650})
+    monkeypatch.setattr(cat, "SESSION", session)
+    assert cat.check_for_new_years(cache, now=datetime(2026, 12, 1, tzinfo=UTC)) == []
+    assert session.calls == [] and not cache.update_check.exists()
+
+
+def test_missing_current_year_checked_in_january(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    monkeypatch.setattr(cat, "SESSION", ApiSession({2026: 5587, 2027: 5650}))
+    assert cat.check_for_new_years(cache, now=datetime(2027, 1, 5, tzinfo=UTC)) == [2027]
+
+
+# --- resilience to NASA format changes ----------------------------------
+
+
+class ScriptedSession:
+    """Returns canned replies by URL substring."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def get(self, url, timeout=None, **_):
+        self.calls.append(url)
+        for key, reply in self.routes.items():
+            if key in url:
+                return reply
+        raise AssertionError(f"unexpected URL {url}")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "<html>maintenance</html>",
+        ["not", "a", "dict"],
+        {"time": "2027-01-01T00:00", "image": "a-string-now"},
+        {"time": "2027-01-01T00:00", "image": {"url": None}},
+        {"time": "2027-01-01T00:00", "image": {"url": "https://svs.gsfc.nasa.gov/new/layout/moon.jpg"}},
+        {"when": "2027-01-01"},
+    ],
+)
+def test_discovery_survives_api_format_changes(payload, monkeypatch):
+    monkeypatch.setattr(cat, "SESSION", ScriptedSession({"/api/": FakeResponse(payload=payload)}))
+    assert cat.discover_visualization_id(2027) is None
+
+
+def test_api_returning_non_json_does_not_raise_from_check(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+
+    class BadJson(FakeResponse):
+        def json(self):
+            raise ValueError("Expecting value")
+
+    monkeypatch.setattr(cat, "SESSION", ScriptedSession({"/api/": BadJson()}))
+    assert cat.check_for_new_years(cache, now=datetime(2026, 11, 1, tzinfo=UTC)) == []
+
+
+def test_wrong_discovered_id_is_not_persisted(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    api = FakeResponse(payload={
+        "time": "2027-01-01T00:00",
+        "image": {"url": "https://svs.gsfc.nasa.gov/vis/a000000/a009900/a009999/frames/730x730_1x1_30p/moon.0001.jpg"},
+    })
+    page_without_json = FakeResponse(text="<html>some other visualization</html>")
+    monkeypatch.setattr(cat, "SESSION", ScriptedSession({"/api/": api, "/9999/": page_without_json}))
+
+    assert cat.check_for_new_years(cache, now=datetime(2026, 11, 1, tzinfo=UTC)) == []
+    assert 2027 not in cat.known_visualizations(cache)  # rediscovered tomorrow
+
+
+def test_corrupt_check_file_does_not_block_checks(cache, monkeypatch):
+    write_year(cache, 2026, hours=1)
+    cache.update_check.write_text('{"last_check": "not a date"}')
+    session = ApiSession({2026: 5587})
+    monkeypatch.setattr(cat, "SESSION", session)
+    cat.check_for_new_years(cache, now=datetime(2026, 11, 1, tzinfo=UTC))
+    assert len(session.calls) == 1
+
+
+def test_image_url_falls_back_to_api_when_frames_dir_missing(cache, monkeypatch):
+    record = cat.MoonRecord(2027, 99, datetime(2027, 1, 5, 3, tzinfo=UTC), *([0.0] * 11))
+    cache.visualizations.write_text('{"2027": 5650}')
+    api_url = "https://svs.gsfc.nasa.gov/vis/a000000/a005600/a005650/frames/1024x1024_new/moon.0100.jpg"
+    monkeypatch.setattr(cat, "SESSION", ScriptedSession({
+        "/5650/": FakeResponse(text="<html>frames renamed</html>"),
+        "/api/dialamoon/2027-01-05T03:00": FakeResponse(payload={
+            "time": "2027-01-05T03:00", "image": {"url": api_url},
+        }),
+    }))
+    assert cat.image_url(cache, record) == api_url
+
+
+def test_image_url_raises_clearly_when_nothing_works(cache, monkeypatch):
+    record = cat.MoonRecord(2027, 0, datetime(2027, 1, 1, tzinfo=UTC), *([0.0] * 11))
+    cache.visualizations.write_text('{"2027": 5650}')
+    monkeypatch.setattr(cat, "SESSION", ScriptedSession({
+        "/5650/": FakeResponse(text="<html></html>"),
+        "/api/": FakeResponse(payload={"time": "2026-12-31T23:00", "image": {"url": "x"}}),
+    }))
+    with pytest.raises(RuntimeError, match="NASA has no image for 2027-01-01T00:00"):
+        cat.image_url(cache, record)

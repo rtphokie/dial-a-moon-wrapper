@@ -28,6 +28,11 @@ NASA_BASE = "https://svs.gsfc.nasa.gov"
 REQUEST_TIMEOUT = 30
 FIRST_YEAR = 2011
 
+# NASA publishes the following year's visualization around November.
+# From this month on, look for it at most once per UPDATE_CHECK_INTERVAL.
+NEXT_YEAR_CHECK_MONTH = 10
+UPDATE_CHECK_INTERVAL = timedelta(days=1)
+
 # NASA annual Dial-A-Moon visualization IDs.
 #
 # These are deliberately kept here rather than trying to infer the
@@ -155,16 +160,11 @@ def discover_frames_url(visualization_id: int) -> str:
 
 
 def _read_manifest(paths: CachePaths) -> dict[str, str]:
-    try:
-        return json.loads(paths.frame_manifest.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return _read_json(paths.frame_manifest)
 
 
 def _write_manifest(paths: CachePaths, manifest: dict[str, str]) -> None:
-    temporary = paths.frame_manifest.with_suffix(".tmp")
-    temporary.write_text(json.dumps(manifest, indent=2, sort_keys=True))
-    temporary.replace(paths.frame_manifest)
+    _write_json(paths.frame_manifest, manifest)
 
 
 def frames_url(paths: CachePaths, year: int) -> str:
@@ -176,17 +176,93 @@ def frames_url(paths: CachePaths, year: int) -> str:
     manifest = _read_manifest(paths)
     key = str(year)
     if key not in manifest:
-        manifest[key] = discover_frames_url(ANNUAL_VISUALIZATIONS[year])
-        paths.metadata.mkdir(parents=True, exist_ok=True)
+        vid = known_visualizations(paths).get(year)
+        if vid is None:
+            raise RuntimeError(f"No NASA visualization ID is known for {year}")
+        manifest[key] = discover_frames_url(vid)
         _write_manifest(paths, manifest)
     return manifest[key]
 
 
-def image_url(paths: CachePaths, record: MoonRecord) -> str:
-    return urljoin(
-        frames_url(paths, record.year),
-        f"moon.{record.frame_number:04d}.jpg",
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def known_visualizations(paths: CachePaths) -> dict[int, int]:
+    """Built-in visualization IDs plus any discovered and cached since."""
+
+    discovered = {
+        int(year): int(vid)
+        for year, vid in _read_json(paths.visualizations).items()
+    }
+    return {**discovered, **ANNUAL_VISUALIZATIONS}
+
+
+def discover_visualization_id(year: int) -> Optional[int]:
+    """
+    Ask NASA's Dial-A-Moon API which visualization holds ``year``.
+
+    For a year NASA hasn't published, the API returns the last frame it
+    has (e.g. 2026-12-31T23:00 for a 2027 request), so the year is only
+    accepted when the returned time falls inside it.
+    """
+
+    response = SESSION.get(
+        f"{NASA_BASE}/api/dialamoon/{year}-01-01T00:00",
+        timeout=REQUEST_TIMEOUT,
     )
+    response.raise_for_status()
+    time_text, url = _api_frame(response.json())
+
+    if not time_text.startswith(f"{year}-"):
+        return None
+
+    match = re.search(r"/a(\d{6})/frames/", url)
+    return int(match.group(1)) if match else None
+
+
+def _api_frame(data) -> tuple[str, str]:
+    """(time, 730x730 image URL) from a Dial-A-Moon API reply, or ("", "")."""
+
+    if not isinstance(data, dict):
+        return "", ""
+    image = data.get("image")
+    url = image.get("url") if isinstance(image, dict) else None
+    return str(data.get("time", "")), url if isinstance(url, str) else ""
+
+
+def api_image_url(record: MoonRecord) -> str:
+    """
+    Ask the Dial-A-Moon API for a frame's image URL. Used when a year's
+    frame directory can't be found on its page.
+    """
+
+    stamp = f"{record.time_utc:%Y-%m-%dT%H:%M}"
+    response = SESSION.get(f"{NASA_BASE}/api/dialamoon/{stamp}", timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    time_text, url = _api_frame(response.json())
+    if not time_text.startswith(stamp) or not url:
+        raise RuntimeError(f"NASA has no image for {stamp}")
+    return url
+
+
+def image_url(paths: CachePaths, record: MoonRecord) -> str:
+    try:
+        directory = frames_url(paths, record.year)
+    except Exception as exc:
+        log.info("%s: frame directory unavailable (%s); asking the API", record.year, exc)
+        return api_image_url(record)
+    return urljoin(directory, f"moon.{record.frame_number:04d}.jpg")
 
 
 def download_annual_json(
@@ -204,10 +280,14 @@ def download_annual_json(
         log.debug("%s: cached", year)
         return destination
 
-    visualization_id = ANNUAL_VISUALIZATIONS.get(year)
+    visualization_id = known_visualizations(paths).get(year)
+    newly_discovered = visualization_id is None
 
-    if visualization_id is None:
-        raise RuntimeError(f"No NASA visualization ID is known for {year}")
+    if newly_discovered:
+        visualization_id = discover_visualization_id(year)
+        if visualization_id is None:
+            raise RuntimeError(f"NASA has not published {year} yet")
+        log.info("%s: found NASA visualization %s", year, visualization_id)
 
     log.info("%s: discovering NASA JSON...", year)
 
@@ -242,6 +322,13 @@ def download_annual_json(
 
     temporary.replace(destination)
 
+    # Remember a discovered ID only once it has proven to hold the data,
+    # so a wrong guess is rediscovered next time rather than cached.
+    if newly_discovered:
+        discovered = _read_json(paths.visualizations)
+        discovered[str(year)] = visualization_id
+        _write_json(paths.visualizations, discovered)
+
     log.info("%s: cached %s records", year, f"{len(data):,}")
 
     return destination
@@ -273,16 +360,53 @@ def bootstrap_metadata(
         except Exception as exc:
             log.warning("unable to obtain %s: %s", year, exc)
 
-    # NASA historically publishes the following year's visualization
-    # in November. Start checking in October.
-    if now.month >= 10:
-        next_year = current_year + 1
+    if now.month >= NEXT_YEAR_CHECK_MONTH:
+        try:
+            download_annual_json(paths, current_year + 1, force=force)
+        except Exception as exc:
+            log.info("%s: not yet available: %s", current_year + 1, exc)
 
-        if next_year in ANNUAL_VISUALIZATIONS:
-            try:
-                download_annual_json(paths, next_year, force=force)
-            except Exception as exc:
-                log.info("%s: not yet available: %s", next_year, exc)
+
+def check_for_new_years(
+    paths: CachePaths,
+    now: Optional[datetime] = None,
+) -> list[int]:
+    """
+    Fetch newly published annual files, at most once per day.
+
+    The current year is checked whenever it is missing from the cache;
+    from October on the following year is checked too. Each attempt is
+    recorded in ``metadata/update_check.json`` before any network
+    access, so an unreachable NASA site is not retried until the next
+    day either. Returns the years that were newly cached.
+    """
+
+    now = now or datetime.now(timezone.utc)
+    wanted = [now.year]
+    if now.month >= NEXT_YEAR_CHECK_MONTH:
+        wanted.append(now.year + 1)
+
+    missing = [y for y in wanted if not paths.metadata_file(y).exists()]
+    if not missing:
+        return []
+
+    try:
+        last = datetime.fromisoformat(_read_json(paths.update_check)["last_check"])
+    except (KeyError, TypeError, ValueError):
+        last = None
+    if last is not None and now - last < UPDATE_CHECK_INTERVAL:
+        return []
+
+    _write_json(paths.update_check, {"last_check": now.isoformat()})
+
+    added = []
+    for year in missing:
+        try:
+            download_annual_json(paths, year)
+            added.append(year)
+        except Exception as exc:
+            log.info("%s: not yet available: %s", year, exc)
+    return added
 
 
 def has_metadata(paths: CachePaths) -> bool:

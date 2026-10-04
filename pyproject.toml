@@ -3,6 +3,8 @@ name = "dial-a-moon-wrapper"
 version = "0.1.0"
 description = "Observer-oriented Moon images from NASA SVS Dial-A-Moon, for any date and location."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "trice", email = "rtphokie@gmail.com" }
 ]
@@ -28,6 +30,12 @@ dependencies = [
     "timezonefinder>=6.0",
     "tzdata; sys_platform == 'win32'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rtphokie/dial-a-moon-wrapper"
+Repository = "https://github.com/rtphokie/dial-a-moon-wrapper"
+Issues = "https://github.com/rtphokie/dial-a-moon-wrapper/issues"
+"NASA Dial-A-Moon" = "https://svs.gsfc.nasa.gov/gallery/moonphase/"
 
 [project.scripts]
 dial-a-moon = "dial_a_moon_wrapper.cli:main"

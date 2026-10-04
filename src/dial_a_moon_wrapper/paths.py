@@ -60,6 +60,14 @@ class CachePaths:
         return self.metadata / "frames.json"
 
     @property
+    def visualizations(self) -> Path:
+        return self.metadata / "visualizations.json"
+
+    @property
+    def update_check(self) -> Path:
+        return self.metadata / "update_check.json"
+
+    @property
     def geocode_cache(self) -> Path:
         return self.metadata / "geocode.json"
 
