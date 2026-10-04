@@ -1,0 +1,50 @@
+[project]
+name = "dial-a-moon-wrapper"
+version = "0.1.0"
+description = "Observer-oriented Moon images from NASA SVS Dial-A-Moon, for any date and location."
+readme = "README.md"
+authors = [
+    { name = "trice", email = "rtphokie@gmail.com" }
+]
+requires-python = ">=3.11"
+keywords = ["moon", "nasa", "svs", "dial-a-moon", "astronomy", "libration", "lunar phase"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "requests>=2.28",
+    "skyfield>=1.46",
+    "timezonefinder>=6.0",
+    "tzdata; sys_platform == 'win32'",
+]
+
+[project.scripts]
+dial-a-moon = "dial_a_moon_wrapper.cli:main"
+dial-a-moon-wrapper = "dial_a_moon_wrapper.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: talks to svs.gsfc.nasa.gov (run with --run-network)",
+    "ephemeris: needs a JPL ephemeris file (downloaded on first use, ~17 MB)",
+]
