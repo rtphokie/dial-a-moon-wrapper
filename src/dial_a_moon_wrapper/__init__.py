@@ -26,16 +26,18 @@ from .catalog import Catalog, MoonRecord, bootstrap_metadata
 from .cli import main
 from .core import MoonResult, render_moon
 from .geocoding import Place, geocode
-from .geometry import ObserverGeometry, TargetGeometry
+from .geometry import LunarPhase, ObserverGeometry, PhaseEvent, TargetGeometry
 from .paths import CachePaths, default_cache_root
 
 __all__ = [
     "__version__",
     "CachePaths",
     "Catalog",
+    "LunarPhase",
     "MoonRecord",
     "MoonResult",
     "ObserverGeometry",
+    "PhaseEvent",
     "Place",
     "TargetGeometry",
     "bootstrap_metadata",

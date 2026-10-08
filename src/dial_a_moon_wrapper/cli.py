@@ -151,13 +151,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     src = result.source
     obs = result.observer
     if result.place:
-        print(f"Place:    {result.place.name} ({result.latitude:.4f}, {result.longitude:.4f})")
+        print(f"Place:    {result.place.name} ({result.latitude:.2f}, {result.longitude:.2f})")
     print(f"Local:    {result.local_datetime.isoformat()}")
     print(f"UTC:      {result.utc_datetime.isoformat()}")
     print(f"Zone:     {result.timezone}")
     print(f"Status:   {result.status}")
     print(f"Source:   {src.year} frame {src.frame_number} ({src.time_utc.isoformat()})")
-    print(f"Phase:    {src.phase:.1f}% illuminated")
+    phase = result.phase
+    print(f"Phase:    {phase.name}, {phase.illumination:.1f}% illuminated")
+    for label, event in (("Previous", phase.previous), ("Next", phase.next)):
+        if event:
+            when = result.local_time(event.utc_datetime)
+            print(f"{label + ':':<10}{event.name}, {when:%Y-%m-%d %H:%M %Z}")
     print(f"Moon:     alt {obs.altitude:.1f} deg, az {obs.azimuth:.1f} deg")
     print(f"Rotation: {result.rotation_degrees:+.1f} deg ({result.orientation} up)")
     if result.image:

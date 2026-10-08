@@ -1,12 +1,15 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from dial_a_moon_wrapper.catalog import parse_nasa_time
 from dial_a_moon_wrapper.geometry import (
+    PhaseEvent,
+    compute_lunar_phase,
     compute_observer_geometry,
     compute_target_geometry,
     parallactic_angle,
+    phase_name,
 )
 
 
@@ -90,3 +93,42 @@ def test_de421_range(ephemeris_root):
     for bad in (datetime(1899, 7, 1, tzinfo=timezone.utc), datetime(2060, 1, 1, tzinfo=timezone.utc)):
         with pytest.raises(ValueError, match="outside the DE421 ephemeris range"):
             check_date_supported(bad, ephemeris_root)
+
+
+UTC = timezone.utc
+NOON = datetime(2026, 10, 18, 12, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    "elongation, expected",
+    [
+        (10.0, "Waxing Crescent"),
+        (100.0, "Waxing Gibbous"),
+        (190.0, "Waning Gibbous"),
+        (280.0, "Waning Crescent"),
+    ],
+)
+def test_phase_name_intermediate(elongation, expected):
+    far = PhaseEvent("Full Moon", NOON + timedelta(days=3))
+    assert phase_name(elongation, NOON, None, far) == expected
+
+
+def test_phase_name_principal_within_window():
+    before = PhaseEvent("New Moon", NOON - timedelta(hours=11))
+    after = PhaseEvent("First Quarter", NOON + timedelta(hours=13))
+    assert phase_name(355.0, NOON, before, after) == "New Moon"
+    assert phase_name(85.0, NOON, None, after) == "Waxing Crescent"
+
+
+@pytest.mark.ephemeris
+def test_lunar_phase_matches_almanac(ephemeris_root):
+    """October 2026 principal phases, to the minute (USNO)."""
+
+    p = compute_lunar_phase(datetime(2026, 10, 22, tzinfo=UTC), ephemeris_root)
+    assert p.name == "Waxing Gibbous"
+    assert 50 < p.illumination < 100 and 90 < p.elongation < 180
+    assert p.previous == PhaseEvent("First Quarter", datetime(2026, 10, 18, 16, 13, tzinfo=UTC))
+    assert p.next == PhaseEvent("Full Moon", datetime(2026, 10, 26, 4, 12, tzinfo=UTC))
+
+    full = compute_lunar_phase(datetime(2026, 10, 26, tzinfo=UTC), ephemeris_root)
+    assert full.name == "Full Moon"

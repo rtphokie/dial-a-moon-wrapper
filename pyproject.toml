@@ -1,6 +1,6 @@
 [project]
 name = "dial-a-moon-wrapper"
-version = "0.1.1"
+version = "0.2.0"
 description = "Observer-oriented Moon images from NASA SVS Dial-A-Moon, for any date and location."
 readme = "README.md"
 license = "MIT"

@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -9,7 +9,7 @@ from PIL import Image
 
 from dial_a_moon_wrapper import core
 from dial_a_moon_wrapper.catalog import Catalog
-from dial_a_moon_wrapper.geometry import ObserverGeometry, TargetGeometry
+from dial_a_moon_wrapper.geometry import LunarPhase, ObserverGeometry, PhaseEvent, TargetGeometry
 
 UTC = timezone.utc
 
@@ -148,6 +148,17 @@ def offline(monkeypatch, populated_cache):
         "compute_observer_geometry",
         lambda *a, **k: ObserverGeometry(altitude=40.0, azimuth=180.0, parallactic_angle=12.0),
     )
+    monkeypatch.setattr(
+        core,
+        "compute_lunar_phase",
+        lambda utc_dt, root, ephemeris_file=None: LunarPhase(
+            name="Waxing Gibbous",
+            illumination=75.0,
+            elongation=120.0,
+            previous=PhaseEvent("First Quarter", utc_dt - timedelta(days=3)),
+            next=PhaseEvent("Full Moon", utc_dt + timedelta(days=4)),
+        ),
+    )
     monkeypatch.setattr(core.cat, "image_url", lambda paths, r: f"https://example/moon.{r.frame_number:04d}.jpg")
 
     downloads = []
@@ -173,12 +184,19 @@ def test_render_official(offline):
     assert result.rotation_degrees == pytest.approx(-12.0)
     assert result.image.exists()
     assert result.image.parent == cache.results / "zenith" / "730"
-    assert result.image.name == "20200102T031000Z_+35.7800_-78.6400.jpg"
+    assert result.image.name == "20200102T0310Z_+35.78_-78.64.jpg"
     assert downloads == [f"https://example/moon.{result.source.frame_number:04d}.jpg"]
 
     payload = json.loads(result.result_json.read_text())
     assert payload["status"] == "official"
     assert payload["observer"]["above_horizon"] is True
+    assert payload["phase"]["name"] == "Waxing Gibbous"
+    assert payload["phase"]["previous"] == {
+        "name": "First Quarter",
+        "local_datetime": "2019-12-29T22:10:00-05:00",
+        "utc_datetime": "2019-12-30T03:10:00+00:00",
+    }
+    assert payload["phase"]["next"]["name"] == "Full Moon"
 
 
 def test_render_estimated(offline, tmp_path):
@@ -192,6 +210,51 @@ def test_render_estimated(offline, tmp_path):
     assert result.rotation_degrees == pytest.approx(25.0 - future_match.posangle)
     assert result.image == out and out.exists()
     assert result.notes
+
+
+def test_coordinates_rounded(offline):
+    cache, _, _ = offline
+    result = core.render_moon(
+        "2035-05-01 22:00", 35.78449, -78.63551, cache_dir=cache.root, download_image=False
+    )
+    assert (result.latitude, result.longitude) == (35.78, -78.64)
+    assert result.to_dict()["request"]["latitude"] == 35.78
+
+
+def test_time_rounded_to_minute(offline):
+    cache, _, _ = offline
+    result = core.render_moon(
+        datetime(2020, 1, 2, 3, 10, 31, tzinfo=UTC), 35.78, -78.64,
+        cache_dir=cache.root, download_image=False,
+    )
+    assert result.utc_datetime == datetime(2020, 1, 2, 3, 11, tzinfo=UTC)
+
+
+def test_cached_result_reused(offline):
+    cache, _, downloads = offline
+    when = datetime(2020, 1, 2, 3, 10, tzinfo=UTC)
+    first = core.render_moon(when, 35.78, -78.64, cache_dir=cache.root)
+    first.image.write_bytes(b"cached")  # would be overwritten if regenerated
+
+    again = core.render_moon(
+        when + timedelta(seconds=20), 35.781, -78.641, cache_dir=cache.root
+    )
+    assert again.image == first.image
+    assert again.image.read_bytes() == b"cached"
+    assert len(downloads) == 1
+
+
+def test_cached_result_from_other_frame_regenerated(offline):
+    cache, _, _ = offline
+    when = datetime(2020, 1, 2, 3, 10, tzinfo=UTC)
+    first = core.render_moon(when, 35.78, -78.64, cache_dir=cache.root)
+    first.image.write_bytes(b"stale")
+    payload = json.loads(first.result_json.read_text())
+    payload["source"]["frame"] += 1
+    first.result_json.write_text(json.dumps(payload))
+
+    core.render_moon(when, 35.78, -78.64, cache_dir=cache.root)
+    assert first.image.read_bytes() != b"stale"
 
 
 def test_render_without_image(offline):

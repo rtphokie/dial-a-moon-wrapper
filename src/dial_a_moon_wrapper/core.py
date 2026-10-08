@@ -30,17 +30,23 @@ from . import catalog as cat
 from .catalog import Catalog, MoonRecord
 from .geocoding import Place, geocode
 from .geometry import (
+    LunarPhase,
     ObserverGeometry,
+    PhaseEvent,
     TargetGeometry,
     check_date_supported,
+    compute_lunar_phase,
     compute_observer_geometry,
     compute_target_geometry,
+    round_minute,
 )
 from .paths import DEFAULT_CACHE_TTL, CachePaths, prune_cache
 
 log = logging.getLogger(__name__)
 
 Orientation = Literal["zenith", "north"]
+
+COORDINATE_DECIMALS = 2
 DateLike = Union[datetime, str, None]
 
 # Approximate natural scale of each quantity's effect on the lunar
@@ -76,6 +82,7 @@ class MoonResult:
     source: MoonRecord
     target: TargetGeometry
     observer: ObserverGeometry
+    phase: LunarPhase
     orientation: Orientation
     rotation_degrees: float
     match_score: float
@@ -126,6 +133,13 @@ class MoonResult:
                 "position_angle": record.posangle,
                 "match_score": self.match_score,
             },
+            "phase": {
+                "name": self.phase.name,
+                "illumination": self.phase.illumination,
+                "elongation_degrees": self.phase.elongation,
+                "previous": self._event_dict(self.phase.previous),
+                "next": self._event_dict(self.phase.next),
+            },
             "target": asdict(self.target),
             "observer": {
                 **asdict(self.observer),
@@ -140,6 +154,18 @@ class MoonResult:
                 "result_json": _str(self.result_json),
             },
             "notes": self.notes,
+        }
+
+    def local_time(self, utc_dt: datetime) -> datetime:
+        return utc_dt.astimezone(ZoneInfo(self.timezone))
+
+    def _event_dict(self, event: Optional[PhaseEvent]) -> Optional[dict]:
+        if event is None:
+            return None
+        return {
+            "name": event.name,
+            "local_datetime": self.local_time(event.utc_datetime).isoformat(),
+            "utc_datetime": event.utc_datetime.isoformat(),
         }
 
 
@@ -376,6 +402,37 @@ def rotate_image(
     return flattened
 
 
+def reuse_result(image: Path, result: MoonResult) -> bool:
+    """
+    Point ``result`` at an existing generated image if one was made from
+    the same NASA frame with the same rotation.
+
+    The sidecar JSON records how the image was made. A different frame
+    (e.g. NASA has since published the year, so an "estimated" result
+    is now "official") means the image is regenerated.
+    """
+
+    sidecar = image.with_suffix(".json")
+    try:
+        previous = json.loads(sidecar.read_text(encoding="utf-8"))
+        same = (
+            previous["source"]["year"] == result.source.year
+            and previous["source"]["frame"] == result.source.frame_number
+            and previous["resolution"] == result.resolution
+            and abs(previous["rotation_degrees"] - result.rotation_degrees) < 1e-6
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not same or not image.exists():
+        return False
+
+    image.touch()  # mark as used, for the cache TTL
+    result.image = image
+    result.result_json = sidecar
+    log.info("Reusing %s", image)
+    return True
+
+
 _catalog_cache: dict[tuple, Catalog] = {}
 
 
@@ -418,7 +475,8 @@ def render_moon(
         when: Requested instant. ``None`` means now. A naive datetime or a
             ``"YYYY-MM-DD HH:MM"`` / ISO string is local wall-clock time
             at the observer; an aware datetime is used as-is.
-        latitude, longitude: Observer position in degrees (east positive).
+        latitude, longitude: Observer position in degrees (east positive),
+            rounded to 2 decimal places.
         place: Alternatively, a place name such as ``"Raleigh, NC"`` or
             ``"Paris, France"`` (looked up via OpenStreetMap and cached),
             or a ``"lat, lon"`` string.
@@ -459,6 +517,11 @@ def render_moon(
     elif latitude is None or longitude is None:
         raise ValueError("A place or both latitude and longitude are required")
 
+    # ~1 km. Finer positions don't change the view, and would make every
+    # request a distinct cache entry.
+    latitude = round(float(latitude), COORDINATE_DECIMALS)
+    longitude = round(float(longitude), COORDINATE_DECIMALS)
+
     if auto_bootstrap and not cat.has_metadata(paths):
         cat.bootstrap_metadata(paths)
     elif check_updates:
@@ -487,6 +550,10 @@ def render_moon(
         local_dt, utc_dt = parse_local_datetime(when, tz_name)
     else:
         local_dt, utc_dt = resolve_datetime(when, tz_name)
+
+    # The view barely changes within a minute; whole minutes let repeated
+    # requests share cached results.
+    local_dt, utc_dt = round_minute(local_dt), round_minute(utc_dt)
 
     check_date_supported(utc_dt, paths.root, ephemeris_file)
 
@@ -518,6 +585,8 @@ def render_moon(
     if observer.altitude <= 0.0:
         notes.append("The Moon is below the observer's horizon.")
 
+    phase = compute_lunar_phase(utc_dt, paths.root, ephemeris_file)
+
     rotation = rotation_angle(
         target.posangle,
         source.posangle,
@@ -537,6 +606,7 @@ def render_moon(
         source=source,
         target=target,
         observer=observer,
+        phase=phase,
         orientation=orientation,
         rotation_degrees=rotation,
         match_score=score,
@@ -572,13 +642,16 @@ def render_moon(
             paths.images / str(source.year) / str(used)
             / f"moon.{source.frame_number:04d}.tif"
         )
-    download_file(result.image_url, result.source_image)
 
     if output is None:
         output = paths.results / orientation / str(used) / (
-            f"{utc_dt:%Y%m%dT%H%M%SZ}_{latitude:+.4f}_{longitude:+.4f}"
+            f"{utc_dt:%Y%m%dT%H%MZ}_{latitude:+.2f}_{longitude:+.2f}"
             + (".jpg" if used == 730 else ".png")
         )
+        if reuse_result(Path(output), result):
+            return result
+
+    download_file(result.image_url, result.source_image)
     result.image = Path(output)
     if rotate_image(result.source_image, result.image, rotation):
         result.notes.append(

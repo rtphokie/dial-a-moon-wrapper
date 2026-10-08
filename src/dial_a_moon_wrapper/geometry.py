@@ -10,7 +10,8 @@ Algorithms* (2nd ed.), chapter 53. Physical libration (< 0.04 deg) is
 ignored, which is far below what is visible in a 730 px frame.
 
 The observer-dependent quantities (altitude, azimuth, parallactic
-angle) used to rotate the image are also computed here.
+angle) used to rotate the image, and the named lunar phase with the
+surrounding principal phases, are also computed here.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 # DE421 is required: NASA computes its Dial-A-Moon renderings from it too.
 EPHEMERIS = "de421.bsp"
@@ -31,6 +33,25 @@ _RANGE_MARGIN = timedelta(days=1)
 
 # Inclination of the mean lunar equator to the ecliptic (Meeus 53).
 _INCLINATION = math.radians(1.54242)
+
+# Principal phases, in the order Skyfield's almanac numbers them.
+PRINCIPAL_PHASES = ("New Moon", "First Quarter", "Full Moon", "Last Quarter")
+
+# Phases between the principal ones, by elongation quadrant.
+INTERMEDIATE_PHASES = (
+    "Waxing Crescent",
+    "Waxing Gibbous",
+    "Waning Gibbous",
+    "Waning Crescent",
+)
+
+# A principal phase is an instant; within this long of it the Moon is
+# called by that name rather than the intermediate one.
+PRINCIPAL_PHASE_WINDOW = timedelta(hours=12)
+
+# Principal phases are at most ~8.3 days apart, so a search this far
+# either side always finds the previous and next one.
+_PHASE_SEARCH = timedelta(days=10)
 
 
 @dataclass(frozen=True)
@@ -46,6 +67,33 @@ class TargetGeometry:
 
 
 @dataclass(frozen=True)
+class PhaseEvent:
+    """One principal lunar phase."""
+
+    name: str
+    utc_datetime: datetime
+
+
+@dataclass(frozen=True)
+class LunarPhase:
+    """
+    The Moon's phase at an instant.
+
+    ``elongation`` is the Moon's ecliptic longitude minus the Sun's
+    (0 = new, 90 = first quarter, 180 = full, 270 = last quarter).
+    ``previous`` and ``next`` are the nearest principal phases strictly
+    before and at-or-after the instant; either is None only at the edges
+    of the ephemeris.
+    """
+
+    name: str
+    illumination: float
+    elongation: float
+    previous: Optional[PhaseEvent]
+    next: Optional[PhaseEvent]
+
+
+@dataclass(frozen=True)
 class ObserverGeometry:
     """Topocentric view of the Moon for one observer."""
 
@@ -56,6 +104,12 @@ class ObserverGeometry:
 
 def _wrap180(degrees: float) -> float:
     return (degrees + 180.0) % 360.0 - 180.0
+
+
+def round_minute(dt: datetime) -> datetime:
+    """Nearest whole minute (half up)."""
+
+    return (dt + timedelta(seconds=30)).replace(second=0, microsecond=0)
 
 
 @lru_cache(maxsize=4)
@@ -289,4 +343,62 @@ def compute_observer_geometry(
         parallactic_angle=parallactic_angle(
             float(ha.hours) * 15.0, float(dec.degrees), latitude
         ),
+    )
+
+
+def phase_name(
+    elongation: float,
+    utc_dt: datetime,
+    previous: Optional[PhaseEvent],
+    next_: Optional[PhaseEvent],
+) -> str:
+    """
+    Principal phase name within ``PRINCIPAL_PHASE_WINDOW`` of one,
+    otherwise waxing/waning crescent/gibbous from the elongation.
+    """
+
+    nearby = [
+        (abs(event.utc_datetime - utc_dt), event.name)
+        for event in (previous, next_)
+        if event is not None
+        and abs(event.utc_datetime - utc_dt) <= PRINCIPAL_PHASE_WINDOW
+    ]
+    if nearby:
+        return min(nearby)[1]
+    return INTERMEDIATE_PHASES[int((elongation % 360.0) // 90.0)]
+
+
+def compute_lunar_phase(
+    utc_dt: datetime,
+    cache_root: Path,
+    ephemeris_file: str | os.PathLike | None = None,
+) -> LunarPhase:
+    from skyfield import almanac
+    from skyfield.searchlib import find_discrete
+
+    ts, eph = load_ephemeris(cache_root, ephemeris_file)
+    t = ts.from_datetime(utc_dt)
+
+    first, last = ephemeris_range(cache_root, ephemeris_file)
+    times, phases = find_discrete(
+        ts.from_datetime(max(utc_dt - _PHASE_SEARCH, first)),
+        ts.from_datetime(min(utc_dt + _PHASE_SEARCH, last)),
+        almanac.moon_phases(eph),
+    )
+    events = [
+        PhaseEvent(PRINCIPAL_PHASES[int(p)], round_minute(when.utc_datetime()))
+        for when, p in zip(times, phases)
+    ]
+    previous = next((e for e in reversed(events) if e.utc_datetime < utc_dt), None)
+    following = next((e for e in events if e.utc_datetime >= utc_dt), None)
+
+    elongation = float(almanac.moon_phase(eph, t).degrees) % 360.0
+    illumination = 100.0 * float(almanac.fraction_illuminated(eph, "moon", t))
+
+    return LunarPhase(
+        name=phase_name(elongation, utc_dt, previous, following),
+        illumination=illumination,
+        elongation=elongation,
+        previous=previous,
+        next=following,
     )
